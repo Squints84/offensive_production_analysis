@@ -1,0 +1,21 @@
+# Virtual environments and tooling
+.venv/
+.pytest_cache/
+.cursor/
+.ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Secrets and local env
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp

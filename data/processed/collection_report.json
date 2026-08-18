@@ -1,0 +1,36 @@
+{
+  "dataset_rows": 2170,
+  "eligible_by_season": {
+    "2024": 455,
+    "2025": 461,
+    "2026": 399
+  },
+  "eligible_rows": 1315,
+  "minimum_competitive_swings": 50,
+  "minimum_pa": 100,
+  "missing_among_eligible": {
+    "attack_angle": 0,
+    "avg_bat_speed": 0,
+    "distance_off_plate": 0,
+    "ops": 0,
+    "ops_plus": 0,
+    "woba": 0,
+    "wrc_plus": 0,
+    "xwoba": 0
+  },
+  "retrieved_on": "2026-07-24",
+  "seasons": [
+    2024,
+    2025,
+    2026
+  ],
+  "source_rows": {
+    "baseball_reference": 2171,
+    "baseball_reference_unresolved": 1,
+    "fangraphs": 1930,
+    "savant_bat_tracking": 1926,
+    "savant_expected": 1930,
+    "savant_swing_path": 1926
+  },
+  "unresolved_bbref_rows": 1
+}

@@ -1,0 +1,2 @@
+metric,candidate_model,reference_model,difference,ci_lower,ci_upper,iterations
+mae,elastic_net:core_plus_traits,elastic_net:core,-0.28362761376486034,-0.4773814698731992,-0.07790520554589837,500

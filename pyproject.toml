@@ -1,0 +1,35 @@
+[project]
+name = "mlb-offense-analysis"
+version = "0.1.0"
+description = "Reproducible ingestion for MLB offensive production and hitter-trait data"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.14",
+    "curl-cffi>=0.13",
+    "fungo>=2.0.0",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.11.1",
+    "pandas>=2.3",
+    "pyarrow>=21",
+    "requests>=2.32",
+    "scikit-learn>=1.9.0",
+    "seaborn>=0.13.2",
+    "statsmodels>=0.14.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9"]
+
+[project.scripts]
+collect-mlb-offense = "mlb_offense.ingestion:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mlb_offense"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
