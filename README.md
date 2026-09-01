@@ -1,11 +1,23 @@
-# MLB Offensive Production Data
+# MLB Offensive Production Data Analysis
 
 This project builds a player-season dataset and grouped regression analysis for
 studying how swing behavior and hitter traits relate to offensive production.
 It uses 2024, 2025, and 2026 YTD by default because 2024 is the first full
 season of public Statcast bat tracking.
 
-## Sources
+My goal with this project was to see how much swing and stance metrics made newly available a couple years ago affect offensive production, and to see whether those same traits could reconstruct same-season wRC+ with any kind of accuracy.
+
+What I learned was that blast and bat speed ranked the highest, with ranking collapsing soon after. 
+
+![Ranking of different traits](data/analysis/trait_ranking.png)
+
+![Raw versus residualized traits](data/analysis/trait_raw_vs_residualized.png)
+
+OPS and wOBA are production, we would just end up ranking the outcome against itself if it was included in the ranking. Barrels and exit velocity come after the swing, where we've already reached a high value outcome. The question being posed concerns the swing itself, and what traits of the swing produce high value outcomes.
+
+## How it was built
+
+Player-seasons are joined from Baseball Savant (bat tracking, stance, and expected stats), FanGraphs (wRC+ and plate discipline), and Baseball-Reference (combined OPS+, including traded players). The analysis uses 2024–2026 with `PA >= 100` and at least 50 competitive swings. Reconstruction is nested cross-validation grouped by player, so a hitter’s seasons never leak across train and test. OPS, wOBA, and xwOBA are never used as predictors of wRC+.
 
 - **Baseball Savant:** wOBA, xwOBA, xBA, xSLG, bat speed, swing length,
   squared-up/blast/whiff rates, attack angle, swing-path tilt, stance position,
@@ -14,101 +26,21 @@ season of public Statcast bat tracking.
 - **Baseball-Reference:** exact combined player-season OPS+, including a single
   combined row for traded players.
 
-Savant's CSV exports and FanGraphs' JSON endpoint are public but not versioned
-APIs. Raw responses are therefore cached. FanGraphs says automated access is
-unsupported, and Baseball-Reference rate limits automated requests; do not
-delete caches merely to rerun an analysis.
+Savant's CSV exports and FanGraphs' JSON endpoint are public but the responses are messy. Raw responses are therefore cached. FanGraphs says automated access is unsupported, and Baseball-Reference rate limits automated requests; do not delete caches merely to rerun an analysis. No `pybaseball` code or dependency is used.
 
-No `pybaseball` code or dependency is used.
+## Caveats
 
-## Setup
+- This is same-season association, not a causal claim and not a next-year forecast.
+- 2026 is year-to-date and is frozen at `retrieved_on`.
+- A negative bat-speed OLS coefficient after barrels and exit velocity are in the model is collinearity, not evidence that swinging faster hurts production.
+- `distance_off_plate` and `depth_in_box` are Statcast stance-position fields, measured from the hitter's center of mass. They are not pitch-location data.
+- wRC+ and OPS+ come from different providers and should remain source-labeled.
 
-With the existing virtual environment:
+## Reproduce
 
 ```powershell
 uv pip install --python .venv\Scripts\python.exe -e ".[dev]"
-```
-
-## Collect data
-
-```powershell
-.venv\Scripts\python.exe data_collection.py
-```
-
-Or, after the editable install:
-
-```powershell
 collect-mlb-offense
-```
-
-Useful options:
-
-```powershell
-collect-mlb-offense --seasons 2024 2025 2026 --min-pa 100 --min-competitive-swings 50
-collect-mlb-offense --refresh
-```
-
-`--refresh` replaces the current date's raw caches. Historical caches are not
-overwritten because their retrieval date is part of the filename.
-
-Outputs:
-
-- `data/raw/`: source CSV, JSON, and HTML responses
-- `data/processed/mlb_offense_2024_2026.parquet`: typed analysis dataset
-- `data/processed/mlb_offense_2024_2026.csv`: portable copy
-- `data/processed/collection_report.json`: row counts, coverage, and missingness
-
-The full joined dataset is retained. `analysis_eligible` marks rows meeting the
-configured PA and competitive-swing thresholds with all core production
-metrics available.
-
-## Important interpretation notes
-
-- 2026 is year-to-date and is frozen at `retrieved_on`.
-- `distance_off_plate` and `depth_in_box` are Statcast stance-position fields,
-  measured from the hitter's center of mass. They are not pitch-location data.
-- wRC+ and OPS+ come from different providers and should remain source-labeled.
-- Same-season regressions describe associations, not causal effects or
-  out-of-sample forecasts.
-
-## Run the analysis
-
-The notebook is split into three parts:
-
-1. Rank swing and stance traits by Pearson and Spearman association with wRC+
-   (and xwOBA as a second outcome). Barrels, exit velocity, OPS, and wOBA are
-   excluded from that ranking. OPS and wOBA *are* production; barrels and EV
-   are batted-ball results downstream of the swing.
-2. Show how those traits overlap with barrels, hard-hit rate, EV, K%, and BB%,
-   then residualize each trait and wRC+ on that core block.
-3. Reconstruct same-season wRC+ from `core` stats, then from `core_plus_traits`.
-
-Reconstruction models:
-
-- a season-mean baseline;
-- OLS, ridge, and elastic-net regressions;
-- a constrained random forest for nonlinearities.
-
-Reconstruction uses nested, player-grouped cross-validation and reports MAE,
-RMSE, R², calibration, PA-weighted sensitivity metrics, a player-cluster
-bootstrap interval for the trait-block MAE difference, cluster-robust OLS
-intervals, and descriptive permutation importance.
-
-```powershell
 .venv\Scripts\jupyter.exe nbconvert --to notebook --execute offensive_analysis.ipynb --output offensive_analysis.executed.ipynb
-```
-
-The executed notebook writes reproducible analysis tables and figures to
-`data/analysis/`. In particular, do not use OPS, OPS+, wOBA, xwOBA, or
-`batter_run_value` as predictors of wRC+: they are excluded by the analysis
-module because they would create formulaic target leakage. The Part 1 ranking
-also omits barrel rate, hard-hit rate, exit velocity, and launch angle so
-contact quality does not crowd out swing and stance traits.
-
-## Tests
-
-```powershell
 .venv\Scripts\python.exe -m pytest
 ```
-
-Tests use local fixtures and do not consume provider request budgets.
