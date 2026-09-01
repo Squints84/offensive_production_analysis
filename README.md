@@ -73,19 +73,21 @@ metrics available.
 
 ## Run the analysis
 
-The notebook starts with **Act 1**: rank swing and stance traits by Pearson and
-Spearman association with wRC+ (and xwOBA as a second outcome). Barrels, exit
-velocity, OPS, and wOBA are excluded from that ranking. OPS and wOBA *are*
-production; barrels and EV are batted-ball results downstream of the swing.
-Including them would make the ranking circular or dominated by near-outcomes.
+The notebook is split into three parts:
 
-The later cells still evaluate reconstruction models:
+1. Rank swing and stance traits by Pearson and Spearman association with wRC+
+   (and xwOBA as a second outcome). Barrels, exit velocity, OPS, and wOBA are
+   excluded from that ranking. OPS and wOBA *are* production; barrels and EV
+   are batted-ball results downstream of the swing.
+2. Show how those traits overlap with barrels, hard-hit rate, EV, K%, and BB%,
+   then residualize each trait and wRC+ on that core block.
+3. Reconstruct same-season wRC+ from `core` stats, then from `core_plus_traits`.
+
+Reconstruction models:
 
 - a season-mean baseline;
 - OLS, ridge, and elastic-net regressions;
-- a constrained random forest for nonlinearities;
-- `core` predictors (context, discipline, contact quality) versus
-  `core_plus_traits` (bat tracking and stance metrics).
+- a constrained random forest for nonlinearities.
 
 Reconstruction uses nested, player-grouped cross-validation and reports MAE,
 RMSE, R², calibration, PA-weighted sensitivity metrics, a player-cluster
@@ -99,7 +101,7 @@ intervals, and descriptive permutation importance.
 The executed notebook writes reproducible analysis tables and figures to
 `data/analysis/`. In particular, do not use OPS, OPS+, wOBA, xwOBA, or
 `batter_run_value` as predictors of wRC+: they are excluded by the analysis
-module because they would create formulaic target leakage. The Act 1 ranking
+module because they would create formulaic target leakage. The Part 1 ranking
 also omits barrel rate, hard-hit rate, exit velocity, and launch angle so
 contact quality does not crowd out swing and stance traits.
 

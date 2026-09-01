@@ -11,8 +11,14 @@ from mlb_offense.analysis import (
     feature_sets,
     format_trait_ranking,
     load_analysis_data,
+    plot_raw_vs_residualized,
+    plot_reconstruction_mae,
+    plot_trait_block_increment,
+    plot_trait_core_heatmap,
     plot_trait_ranking,
     rank_hitter_traits,
+    residualized_trait_associations,
+    trait_core_correlations,
 )
 
 
@@ -180,3 +186,100 @@ def test_plot_trait_ranking_returns_figure() -> None:
         assert len(figure.axes) == 2
     finally:
         plt.close(figure)
+
+
+def test_trait_core_correlations_exclude_production_metrics() -> None:
+    overlap = trait_core_correlations(_sample_data())
+
+    assert "barrel_rate" in overlap.columns
+    assert "avg_bat_speed" in overlap.index
+    assert not set(overlap.columns) & analysis.LEAKAGE_COLUMNS
+    assert not set(overlap.index) & analysis.RANKING_EXCLUSIONS
+
+
+def test_residualized_correlation_shrinks_after_core_controls() -> None:
+    rng = np.random.default_rng(0)
+    n = 120
+    barrel = rng.normal(0.08, 0.03, n)
+    data = pd.DataFrame(
+        {
+            "barrel_rate": barrel,
+            "hard_hit_rate": rng.normal(0.40, 0.04, n),
+            "avg_exit_velocity": 89 + rng.normal(0, 1.5, n),
+            "strikeout_rate": rng.normal(0.22, 0.04, n),
+            "walk_rate": rng.normal(0.09, 0.02, n),
+            "avg_bat_speed": 71 + (50 * barrel) + rng.normal(0, 0.5, n),
+            "wrc_plus": 95 + (350 * barrel) + rng.normal(0, 10, n),
+        }
+    )
+
+    row = residualized_trait_associations(data, traits=("avg_bat_speed",)).iloc[0]
+
+    assert row["raw_r"] > 0.65
+    assert abs(row["residualized_r"]) < abs(row["raw_r"]) - 0.3
+
+
+def test_part_two_plots_return_figures() -> None:
+    overlap = trait_core_correlations(_sample_data())
+    heatmap = plot_trait_core_heatmap(overlap)
+    dumbbell = plot_raw_vs_residualized(
+        residualized_trait_associations(_sample_data(), traits=("avg_bat_speed", "distance_off_plate"))
+    )
+    try:
+        assert heatmap.axes
+        assert dumbbell.axes
+    finally:
+        plt.close(heatmap)
+        plt.close(dumbbell)
+
+
+def test_part_three_plots_return_figures() -> None:
+    performance = pd.DataFrame(
+        {
+            "model": [
+                "mean_baseline:baseline",
+                "elastic_net:core",
+                "elastic_net:core_plus_traits",
+            ],
+            "feature_block": ["baseline", "core", "core_plus_traits"],
+            "model_family": ["mean_baseline", "elastic_net", "elastic_net"],
+            "mae": [22.0, 14.5, 14.2],
+            "r2": [0.0, 0.55, 0.57],
+        }
+    )
+    comparison = pd.DataFrame(
+        {
+            "difference": [-0.28],
+            "ci_lower": [-0.48],
+            "ci_upper": [-0.08],
+        }
+    )
+    importance = pd.DataFrame(
+        {
+            "feature": ["barrel_rate", "avg_bat_speed", "strikeout_rate"],
+            "importance_mean": [4.6, 0.07, 2.8],
+            "importance_std": [0.2, 0.01, 0.1],
+        }
+    )
+    coefficients = pd.DataFrame(
+        {
+            "feature": ["const", "barrel_rate", "avg_bat_speed", "strikeout_rate"],
+            "coefficient": [97.0, 14.4, -6.6, -20.7],
+            "ci_lower": [93.0, 12.0, -11.6, -24.8],
+            "ci_upper": [101.0, 16.7, -1.6, -16.6],
+        }
+    )
+    mae_figure = plot_reconstruction_mae(performance)
+    increment_figure = plot_trait_block_increment(comparison)
+    importance_figure = analysis.plot_permutation_importance(importance)
+    coefficient_figure = analysis.plot_clustered_coefficients(coefficients)
+    try:
+        assert len(mae_figure.axes) == 2
+        assert increment_figure.axes
+        assert importance_figure.axes
+        assert coefficient_figure.axes
+    finally:
+        plt.close(mae_figure)
+        plt.close(increment_figure)
+        plt.close(importance_figure)
+        plt.close(coefficient_figure)

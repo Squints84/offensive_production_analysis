@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import statsmodels.api as sm
+from matplotlib.patches import Patch
 from scipy import stats
 from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyRegressor
@@ -111,6 +112,46 @@ TRAIT_LABELS = {
 OUTCOME_LABELS = {
     "wrc_plus": "wRC+",
     "xwoba": "xwOBA",
+}
+CORE_OVERLAP_FEATURES = (
+    "barrel_rate",
+    "hard_hit_rate",
+    "avg_exit_velocity",
+    "strikeout_rate",
+    "walk_rate",
+)
+CORE_LABELS = {
+    "barrel_rate": "Barrel rate",
+    "hard_hit_rate": "Hard-hit rate",
+    "avg_exit_velocity": "Average exit velocity",
+    "avg_launch_angle": "Average launch angle",
+    "walk_rate": "Walk rate",
+    "strikeout_rate": "Strikeout rate",
+    "swing_rate": "Swing rate",
+    "chase_rate": "Chase rate",
+    "contact_rate": "Contact rate",
+    "zone_contact_rate": "Zone-contact rate",
+    "swinging_strike_rate": "Swinging-strike rate",
+    "age": "Age",
+    "season": "Season",
+    "bats": "Handedness",
+    "const": "Intercept",
+    "season_2025": "Season 2025",
+    "season_2026": "Season 2026",
+    "bats_L": "Bats left",
+    "bats_R": "Bats right",
+}
+BLOCK_LABELS = {
+    "baseline": "Mean baseline",
+    "core": "Core stats",
+    "core_plus_traits": "Core + traits",
+}
+FAMILY_LABELS = {
+    "mean_baseline": "Mean",
+    "ols": "OLS",
+    "ridge": "Ridge",
+    "elastic_net": "Elastic net",
+    "random_forest": "Random forest",
 }
 
 
@@ -276,6 +317,104 @@ def format_trait_ranking(ranking: pd.DataFrame) -> pd.DataFrame:
     return table.sort_values(
         ["_abs", "trait"], ascending=[False, True], ignore_index=True
     ).drop(columns="_abs")
+
+
+def _field_label(column: str) -> str:
+    return TRAIT_LABELS.get(column, CORE_LABELS.get(column, column))
+
+
+def trait_core_correlations(data: pd.DataFrame) -> pd.DataFrame:
+    """Pearson correlations between swing/stance traits and core contact stats.
+
+    Rows are traits from the Part 1 ranking; columns are barrel rate, hard-hit
+    rate, exit velocity, strikeout rate, and walk rate. Production metrics are
+    not included.
+    """
+
+    traits = hitter_trait_columns(data)
+    core = _available(CORE_OVERLAP_FEATURES, data)
+    if not traits or not core:
+        raise ValueError("Trait-core correlations need both trait and core fields.")
+    matrix = data[list(traits) + list(core)].corr(numeric_only=True)
+    overlap = matrix.loc[list(traits), list(core)].copy()
+    ranking = rank_hitter_traits(data)
+    trait_order = ranking.loc[ranking["outcome"].eq("wrc_plus"), "trait"].tolist()
+    ordered_traits = [trait for trait in trait_order if trait in overlap.index]
+    return overlap.loc[ordered_traits]
+
+
+def _ols_residuals(target: pd.Series, controls: pd.DataFrame) -> pd.Series:
+    frame = pd.concat(
+        [pd.to_numeric(target, errors="coerce").rename("_y"), controls],
+        axis=1,
+    ).dropna(subset=["_y"])
+    design = frame.iloc[:, 1:].apply(pd.to_numeric, errors="coerce")
+    for column in design.columns:
+        design[column] = design[column].fillna(design[column].median())
+    if frame["_y"].nunique() < 2 or design.shape[1] == 0:
+        return pd.Series(np.nan, index=target.index)
+    fitted = sm.OLS(
+        frame["_y"].to_numpy(),
+        sm.add_constant(design.to_numpy(), has_constant="add"),
+    ).fit()
+    return pd.Series(fitted.resid, index=frame.index).reindex(target.index)
+
+
+def residualized_trait_associations(
+    data: pd.DataFrame,
+    outcome: str = TARGET,
+    controls: tuple[str, ...] = CORE_OVERLAP_FEATURES,
+    traits: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    """Compare raw trait–outcome Pearson r with r after residualizing on core stats.
+
+    Both the trait and the outcome are residualized on the same control block
+    (barrels, hard-hit, EV, K%, BB% by default). The leftover correlation is
+    the association that is not already sitting in those core stats.
+    """
+
+    selected_traits = traits if traits is not None else hitter_trait_columns(data)
+    control_columns = _available(controls, data)
+    if outcome not in data:
+        raise ValueError(f"Outcome {outcome!r} is absent.")
+    if not selected_traits:
+        raise ValueError("No traits were provided for residualization.")
+    if not control_columns:
+        raise ValueError("No core control fields are available.")
+
+    rows: list[dict[str, object]] = []
+    for trait in selected_traits:
+        raw_r, raw_p, raw_n = _pairwise_association(data[trait], data[outcome], "pearson")
+        frame = data[[trait, outcome, *control_columns]].apply(pd.to_numeric, errors="coerce")
+        frame = frame.dropna(subset=[trait, outcome])
+        if len(frame) < 3 or frame[trait].nunique() < 2 or frame[outcome].nunique() < 2:
+            residual_r, residual_p, residual_n = float("nan"), float("nan"), int(len(frame))
+        else:
+            trait_resid = _ols_residuals(frame[trait], frame[list(control_columns)])
+            outcome_resid = _ols_residuals(frame[outcome], frame[list(control_columns)])
+            residual_r, residual_p, residual_n = _pairwise_association(
+                trait_resid, outcome_resid, "pearson"
+            )
+        rows.append(
+            {
+                "trait": trait,
+                "trait_label": _field_label(trait),
+                "outcome": outcome,
+                "raw_r": raw_r,
+                "raw_p_value": raw_p,
+                "residualized_r": residual_r,
+                "residualized_p_value": residual_p,
+                "n": residual_n if pd.notna(residual_r) else raw_n,
+                "abs_raw_r": abs(raw_r) if pd.notna(raw_r) else float("nan"),
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values(
+        ["abs_raw_r", "trait"],
+        ascending=[False, True],
+        na_position="last",
+        ignore_index=True,
+    )
 
 
 def load_analysis_data(
@@ -839,6 +978,260 @@ def plot_trait_ranking(ranking: pd.DataFrame) -> plt.Figure:
         axis.set_xlim(-1.05, 1.05)
         axis.set_title(f"vs {OUTCOME_LABELS.get(outcome, outcome)}")
     figure.suptitle("Swing and stance traits vs offensive production", fontsize=13)
+    figure.tight_layout()
+    return figure
+
+
+def plot_trait_core_heatmap(overlap: pd.DataFrame) -> plt.Figure:
+    """Plot Pearson correlations of swing/stance traits with core contact stats."""
+
+    if overlap.empty:
+        raise ValueError("Trait-core correlation matrix is empty.")
+    labeled = overlap.rename(
+        index=_field_label,
+        columns=_field_label,
+    )
+    figure, axis = plt.subplots(
+        figsize=(8.5, max(6.0, 0.38 * len(labeled.index) + 1.6))
+    )
+    sns.heatmap(
+        labeled,
+        cmap="vlag",
+        center=0,
+        vmin=-1,
+        vmax=1,
+        annot=True,
+        fmt=".2f",
+        annot_kws={"size": 8},
+        cbar_kws={"label": "Pearson correlation"},
+        ax=axis,
+    )
+    axis.set(
+        title="Swing traits vs barrels, exit velocity, and plate discipline",
+        xlabel="Core contact and discipline stats",
+        ylabel="Swing and stance traits",
+    )
+    figure.tight_layout()
+    return figure
+
+
+def plot_raw_vs_residualized(associations: pd.DataFrame) -> plt.Figure:
+    """Plot raw vs residualized trait–wRC+ correlations as a dumbbell chart."""
+
+    if associations.empty:
+        raise ValueError("Residualized associations are empty.")
+    frame = (
+        associations.dropna(subset=["raw_r", "residualized_r"])
+        .sort_values(["abs_raw_r", "trait"], ascending=[True, False], na_position="first")
+        .reset_index(drop=True)
+    )
+    if frame.empty:
+        raise ValueError("Residualized associations have no finite correlations.")
+    y_positions = np.arange(len(frame))
+    palette = sns.color_palette("colorblind")
+    figure, axis = plt.subplots(figsize=(8.2, max(5.5, 0.38 * len(frame) + 1.8)))
+    axis.hlines(
+        y_positions,
+        frame["raw_r"],
+        frame["residualized_r"],
+        color="0.75",
+        linewidth=1.4,
+        zorder=1,
+    )
+    axis.scatter(
+        frame["raw_r"],
+        y_positions,
+        color=palette[0],
+        s=42,
+        zorder=3,
+        label="Raw Pearson r with wRC+",
+    )
+    axis.scatter(
+        frame["residualized_r"],
+        y_positions,
+        color=palette[1],
+        s=42,
+        zorder=3,
+        label="After controlling for barrels, EV, hard-hit, K%, BB%",
+    )
+    axis.axvline(0, color="black", linewidth=0.8)
+    axis.set_yticks(y_positions, frame["trait_label"])
+    axis.set_xlabel("Pearson correlation with wRC+")
+    axis.set_xlim(-1.05, 1.05)
+    axis.set_title("How much of the trait ranking remains after core stats")
+    axis.legend(loc="lower right", frameon=False)
+    figure.tight_layout()
+    return figure
+
+
+def plot_reconstruction_mae(performance: pd.DataFrame) -> plt.Figure:
+    """Plot grouped-CV MAE and R² for core vs core-plus-traits models."""
+
+    if performance.empty:
+        raise ValueError("Performance table is empty.")
+    frame = performance.copy()
+    frame["block_label"] = frame["feature_block"].map(
+        lambda value: BLOCK_LABELS.get(value, value)
+    )
+    frame["family_label"] = frame["model_family"].map(
+        lambda value: FAMILY_LABELS.get(value, value)
+    )
+    family_order = [
+        label
+        for key, label in FAMILY_LABELS.items()
+        if label in set(frame["family_label"])
+    ]
+    block_order = [
+        label
+        for key, label in BLOCK_LABELS.items()
+        if label in set(frame["block_label"])
+    ]
+    palette = sns.color_palette("colorblind")
+    figure, axes = plt.subplots(1, 2, figsize=(11.5, 4.8))
+    sns.barplot(
+        data=frame,
+        x="family_label",
+        y="mae",
+        hue="block_label",
+        order=family_order,
+        hue_order=block_order,
+        palette=palette[: len(block_order)],
+        ax=axes[0],
+    )
+    axes[0].set(
+        title="Out-of-fold MAE",
+        xlabel="Model",
+        ylabel="Mean absolute error (wRC+ points)",
+    )
+    axes[0].legend(title="", frameon=False)
+    sns.barplot(
+        data=frame,
+        x="family_label",
+        y="r2",
+        hue="block_label",
+        order=family_order,
+        hue_order=block_order,
+        palette=palette[: len(block_order)],
+        ax=axes[1],
+    )
+    axes[1].set(title="Out-of-fold R²", xlabel="Model", ylabel="R²")
+    axes[1].legend(title="", frameon=False)
+    figure.suptitle("Reconstructing same-season wRC+: core stats vs core plus traits")
+    figure.tight_layout()
+    return figure
+
+
+def plot_trait_block_increment(comparison: pd.DataFrame) -> plt.Figure:
+    """Plot the bootstrapped MAE difference when traits are added to core stats."""
+
+    if comparison.empty:
+        raise ValueError("Increment comparison is empty.")
+    row = comparison.iloc[0]
+    difference = float(row["difference"])
+    lower = float(row["ci_lower"])
+    upper = float(row["ci_upper"])
+    figure, axis = plt.subplots(figsize=(8.2, 2.4))
+    axis.errorbar(
+        difference,
+        0,
+        xerr=[[difference - lower], [upper - difference]],
+        fmt="o",
+        color=sns.color_palette("colorblind")[0],
+        capsize=5,
+        markersize=8,
+    )
+    axis.axvline(0, color="black", linewidth=0.8)
+    axis.set_yticks([])
+    axis.set_xlabel("MAE difference in wRC+ points (core + traits minus core)")
+    axis.set_xlim(min(-0.8, lower - 0.1), max(0.2, upper + 0.1))
+    axis.set_title(
+        "Adding swing/stance traits changes MAE by "
+        f"{difference:.2f} (95% player-cluster interval {lower:.2f} to {upper:.2f})"
+    )
+    figure.tight_layout()
+    return figure
+
+
+def plot_permutation_importance(
+    importance: pd.DataFrame, top_n: int = 12
+) -> plt.Figure:
+    """Plot grouped permutation importance, highlighting swing/stance traits."""
+
+    if importance.empty:
+        raise ValueError("Permutation importance table is empty.")
+    frame = importance.sort_values("importance_mean", ascending=True).tail(top_n)
+    palette = sns.color_palette("colorblind")
+    colors = [
+        palette[1] if feature in TRAIT_FEATURES else palette[0]
+        for feature in frame["feature"]
+    ]
+    figure, axis = plt.subplots(figsize=(8.2, max(4.5, 0.38 * len(frame) + 1.4)))
+    axis.barh(
+        range(len(frame)),
+        frame["importance_mean"],
+        xerr=frame["importance_std"] if "importance_std" in frame else None,
+        color=colors,
+        capsize=3,
+    )
+    axis.set_yticks(range(len(frame)), [_field_label(feature) for feature in frame["feature"]])
+    axis.set_xlabel("MAE increase when the feature is shuffled (wRC+ points)")
+    axis.set_title("What the reconstruction model uses (permutation importance)")
+    axis.legend(
+        handles=[
+            Patch(color=palette[0], label="Core stats"),
+            Patch(color=palette[1], label="Swing/stance traits"),
+        ],
+        frameon=False,
+        loc="lower right",
+    )
+    figure.tight_layout()
+    return figure
+
+
+def plot_clustered_coefficients(
+    coefficients: pd.DataFrame, top_n: int = 12
+) -> plt.Figure:
+    """Plot standardized OLS coefficients with clustered confidence intervals."""
+
+    if coefficients.empty:
+        raise ValueError("Coefficient table is empty.")
+    frame = coefficients.loc[~coefficients["feature"].eq("const")].copy()
+    frame["abs_coefficient"] = frame["coefficient"].abs()
+    frame = frame.sort_values("abs_coefficient", ascending=True).tail(top_n)
+    y_positions = np.arange(len(frame))
+    palette = sns.color_palette("colorblind")
+    colors = [
+        palette[1] if feature in TRAIT_FEATURES else palette[0]
+        for feature in frame["feature"]
+    ]
+    figure, axis = plt.subplots(figsize=(8.2, max(4.5, 0.38 * len(frame) + 1.4)))
+    axis.axvline(0, color="black", linewidth=0.8)
+    axis.errorbar(
+        frame["coefficient"],
+        y_positions,
+        xerr=np.vstack(
+            [
+                (frame["coefficient"] - frame["ci_lower"]).to_numpy(),
+                (frame["ci_upper"] - frame["coefficient"]).to_numpy(),
+            ]
+        ),
+        fmt="none",
+        ecolor="0.65",
+        capsize=3,
+        zorder=1,
+    )
+    axis.scatter(frame["coefficient"], y_positions, color=colors, zorder=3)
+    axis.set_yticks(y_positions, [_field_label(feature) for feature in frame["feature"]])
+    axis.set_xlabel("Standardized OLS coefficient for wRC+")
+    axis.set_title("Joint associations after controlling for everything in the model")
+    axis.legend(
+        handles=[
+            Patch(color=palette[0], label="Core stats"),
+            Patch(color=palette[1], label="Swing/stance traits"),
+        ],
+        frameon=False,
+        loc="lower right",
+    )
     figure.tight_layout()
     return figure
 
