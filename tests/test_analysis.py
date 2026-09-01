@@ -1,15 +1,18 @@
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from mlb_offense import analysis
 from mlb_offense.analysis import (
     AnalysisConfig,
-    FeatureSet,
     bootstrap_model_difference,
     feature_sets,
+    format_trait_ranking,
     load_analysis_data,
+    plot_trait_ranking,
+    rank_hitter_traits,
 )
 
 
@@ -38,7 +41,7 @@ def _sample_data() -> pd.DataFrame:
                     "hard_hit_rate": 0.38,
                     "avg_exit_velocity": 88 + player_id / 10,
                     "avg_launch_angle": 12.0,
-                    "avg_bat_speed": 71.0,
+                    "avg_bat_speed": 68.0 + player_id,
                     "fast_swing_rate": 0.25,
                     "swing_length": 7.2,
                     "squared_up_contact_rate": 0.28,
@@ -51,13 +54,13 @@ def _sample_data() -> pd.DataFrame:
                     "attack_angle": 11.0,
                     "attack_direction": 3.0,
                     "ideal_attack_angle_rate": 0.48,
-                    "distance_off_plate": 27.0,
+                    "distance_off_plate": 32.0 - player_id,
                     "depth_in_box": 20.0,
                     "intercept_y_vs_plate": 5.0,
                     "intercept_y_vs_batter": 14.0,
                     "ops": 0.800,
                     "woba": 0.340,
-                    "xwoba": 0.335,
+                    "xwoba": 0.300 + player_id * 0.01,
                     "ops_plus": 115,
                 }
             )
@@ -150,3 +153,30 @@ def test_evaluate_models_keeps_players_within_grouped_folds(monkeypatch) -> None
         "ols:core_plus_traits",
     }
     assert predictions.groupby("model")["observation_id"].nunique().eq(len(data)).all()
+
+
+def test_trait_ranking_excludes_production_and_contact_quality() -> None:
+    assert not set(analysis.TRAIT_FEATURES) & analysis.RANKING_EXCLUSIONS
+
+    ranking = rank_hitter_traits(_sample_data())
+
+    assert not set(ranking["trait"]) & analysis.RANKING_EXCLUSIONS
+    assert {"avg_bat_speed", "attack_angle", "distance_off_plate"} <= set(ranking["trait"])
+    assert set(ranking["outcome"]) == {"wrc_plus", "xwoba"}
+
+
+def test_trait_ranking_orders_by_absolute_association_with_wrc() -> None:
+    table = format_trait_ranking(rank_hitter_traits(_sample_data()))
+
+    assert table.iloc[0]["trait"] == "avg_bat_speed"
+    assert table.iloc[0]["pearson_r_wrc_plus"] > 0.99
+    assert table.iloc[1]["trait"] == "distance_off_plate"
+    assert table.iloc[1]["pearson_r_wrc_plus"] < 0
+
+
+def test_plot_trait_ranking_returns_figure() -> None:
+    figure = plot_trait_ranking(rank_hitter_traits(_sample_data()))
+    try:
+        assert len(figure.axes) == 2
+    finally:
+        plt.close(figure)

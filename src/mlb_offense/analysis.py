@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Iterable
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import statsmodels.api as sm
+from scipy import stats
 from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import RandomForestRegressor
@@ -65,6 +66,8 @@ STANCE_FEATURES = (
     "intercept_y_vs_plate",
     "intercept_y_vs_batter",
 )
+TRAIT_FEATURES = BAT_TRACKING_FEATURES + STANCE_FEATURES
+RANKING_OUTCOMES = ("wrc_plus", "xwoba")
 
 # Do not allow production metrics or components that directly recreate wRC+.
 LEAKAGE_COLUMNS = frozenset(
@@ -79,6 +82,36 @@ LEAKAGE_COLUMNS = frozenset(
         "batter_run_value",
     }
 )
+
+# Not swing/stance traits. They are either the production outcome itself or
+# batted-ball quality sitting downstream of the swing. Ranking them against
+# wRC+ would be circular (OPS, wOBA) or dominated by near-outcome contact
+# results (barrels, exit velocity).
+RANKING_EXCLUSIONS = LEAKAGE_COLUMNS | frozenset(CONTACT_FEATURES)
+
+TRAIT_LABELS = {
+    "avg_bat_speed": "Average bat speed",
+    "fast_swing_rate": "Fast-swing rate",
+    "swing_length": "Swing length",
+    "squared_up_contact_rate": "Squared-up rate (contact)",
+    "squared_up_swing_rate": "Squared-up rate (swings)",
+    "blast_contact_rate": "Blast rate (contact)",
+    "blast_swing_rate": "Blast rate (swings)",
+    "whiff_rate": "Whiff rate",
+    "bbe_per_swing": "Batted balls per swing",
+    "swing_tilt": "Swing-path tilt",
+    "attack_angle": "Attack angle",
+    "attack_direction": "Attack direction",
+    "ideal_attack_angle_rate": "Ideal attack-angle rate",
+    "distance_off_plate": "Distance off the plate",
+    "depth_in_box": "Depth in the box",
+    "intercept_y_vs_plate": "Intercept vs plate",
+    "intercept_y_vs_batter": "Intercept vs batter",
+}
+OUTCOME_LABELS = {
+    "wrc_plus": "wRC+",
+    "xwoba": "xwOBA",
+}
 
 
 @dataclass(frozen=True)
@@ -117,7 +150,7 @@ def feature_sets(data: pd.DataFrame) -> dict[str, FeatureSet]:
     core_numeric = _available(
         CONTEXT_NUMERIC + DISCIPLINE_FEATURES + CONTACT_FEATURES, data
     )
-    trait_numeric = _available(BAT_TRACKING_FEATURES + STANCE_FEATURES, data)
+    trait_numeric = hitter_trait_columns(data)
     categorical = _available(CONTEXT_CATEGORICAL, data)
     return {
         "core": FeatureSet("core", core_numeric, categorical),
@@ -125,6 +158,124 @@ def feature_sets(data: pd.DataFrame) -> dict[str, FeatureSet]:
             "core_plus_traits", core_numeric + trait_numeric, categorical
         ),
     }
+
+
+def hitter_trait_columns(data: pd.DataFrame) -> tuple[str, ...]:
+    """Return swing and stance fields eligible for the trait ranking.
+
+    Production metrics (OPS, wOBA, wRC+) and contact-quality results
+    (barrel rate, exit velocity, hard-hit rate, launch angle) are excluded
+    because they are outcomes or near-outcomes, not hitter traits.
+    """
+
+    columns = _available(TRAIT_FEATURES, data)
+    leaked = sorted(set(columns) & RANKING_EXCLUSIONS)
+    if leaked:
+        raise ValueError(
+            "Trait ranking cannot include production or contact-quality "
+            f"fields: {leaked}"
+        )
+    return columns
+
+
+def _pairwise_association(
+    left: pd.Series, right: pd.Series, method: str
+) -> tuple[float, float, int]:
+    frame = pd.concat([left, right], axis=1).dropna()
+    count = int(len(frame))
+    if (
+        count < 3
+        or frame.iloc[:, 0].nunique() < 2
+        or frame.iloc[:, 1].nunique() < 2
+    ):
+        return float("nan"), float("nan"), count
+    if method == "pearson":
+        result = stats.pearsonr(frame.iloc[:, 0], frame.iloc[:, 1])
+    elif method == "spearman":
+        result = stats.spearmanr(frame.iloc[:, 0], frame.iloc[:, 1])
+    else:
+        raise ValueError("method must be 'pearson' or 'spearman'")
+    return float(result.statistic), float(result.pvalue), count
+
+
+def rank_hitter_traits(
+    data: pd.DataFrame,
+    outcomes: tuple[str, ...] = RANKING_OUTCOMES,
+) -> pd.DataFrame:
+    """Rank swing/stance traits by association with offensive production.
+
+    Pearson r captures linear association; Spearman rho captures monotonic
+    association. Each row is a trait-outcome pair using pairwise-complete
+    player-seasons. This is a descriptive ranking, not a causal effect.
+    """
+
+    traits = hitter_trait_columns(data)
+    available_outcomes = _available(outcomes, data)
+    if not available_outcomes:
+        raise ValueError("None of the ranking outcomes are present in the data.")
+
+    rows: list[dict[str, object]] = []
+    for outcome in available_outcomes:
+        for trait in traits:
+            pearson_r, pearson_p, pearson_n = _pairwise_association(
+                data[trait], data[outcome], "pearson"
+            )
+            spearman_rho, spearman_p, _spearman_n = _pairwise_association(
+                data[trait], data[outcome], "spearman"
+            )
+            rows.append(
+                {
+                    "trait": trait,
+                    "trait_label": TRAIT_LABELS.get(trait, trait),
+                    "outcome": outcome,
+                    "outcome_label": OUTCOME_LABELS.get(outcome, outcome),
+                    "pearson_r": pearson_r,
+                    "pearson_p_value": pearson_p,
+                    "spearman_rho": spearman_rho,
+                    "spearman_p_value": spearman_p,
+                    "n": pearson_n,
+                    "abs_pearson_r": abs(pearson_r) if pd.notna(pearson_r) else float("nan"),
+                }
+            )
+
+    ranking = pd.DataFrame(rows)
+    primary = available_outcomes[0]
+    primary_order = (
+        ranking.loc[ranking["outcome"].eq(primary)]
+        .sort_values(
+            ["abs_pearson_r", "trait"],
+            ascending=[False, True],
+            na_position="last",
+        )["trait"]
+        .tolist()
+    )
+    ranking["rank"] = ranking["trait"].map(
+        {trait: index for index, trait in enumerate(primary_order)}
+    )
+    return ranking.sort_values(["rank", "outcome"], ignore_index=True).drop(
+        columns="rank"
+    )
+
+
+def format_trait_ranking(ranking: pd.DataFrame) -> pd.DataFrame:
+    """Pivot the long ranking into one row per trait, ordered by |r| with wRC+."""
+
+    if ranking.empty:
+        return ranking
+    value_columns = ["pearson_r", "spearman_rho", "n"]
+    pieces = []
+    for column in value_columns:
+        wide = ranking.pivot(index=["trait", "trait_label"], columns="outcome", values=column)
+        wide.columns = [f"{column}_{outcome}" for outcome in wide.columns]
+        pieces.append(wide)
+    table = pd.concat(pieces, axis=1).reset_index()
+    sort_column = (
+        "pearson_r_wrc_plus" if "pearson_r_wrc_plus" in table.columns else table.columns[2]
+    )
+    table["_abs"] = table[sort_column].abs()
+    return table.sort_values(
+        ["_abs", "trait"], ascending=[False, True], ignore_index=True
+    ).drop(columns="_abs")
 
 
 def load_analysis_data(
@@ -637,6 +788,58 @@ def plot_correlation(data: pd.DataFrame, features: FeatureSet) -> plt.Figure:
     figure, axis = plt.subplots(figsize=(12, 9))
     sns.heatmap(matrix, cmap="vlag", center=0, vmin=-1, vmax=1, ax=axis)
     axis.set(title="Pearson correlation among model predictors and wRC+")
+    return figure
+
+
+def plot_trait_ranking(ranking: pd.DataFrame) -> plt.Figure:
+    """Plot Pearson correlations of swing/stance traits with wRC+ and xwOBA."""
+
+    if ranking.empty:
+        raise ValueError("Trait ranking is empty.")
+    wrc = ranking.loc[ranking["outcome"].eq("wrc_plus")].sort_values(
+        "abs_pearson_r", ascending=True, na_position="first"
+    )
+    trait_order = wrc["trait"].tolist()
+    labels = wrc["trait_label"].tolist()
+    outcomes = [
+        outcome
+        for outcome in ("wrc_plus", "xwoba")
+        if outcome in set(ranking["outcome"])
+    ]
+    figure, axes = plt.subplots(
+        1,
+        len(outcomes),
+        figsize=(6.2 * len(outcomes), max(5.5, 0.38 * len(trait_order) + 1.8)),
+        sharey=True,
+        squeeze=False,
+    )
+    palette = sns.color_palette("colorblind")
+    positive = palette[0]
+    negative = palette[3]
+    for axis, outcome in zip(axes[0], outcomes, strict=True):
+        frame = ranking.loc[ranking["outcome"].eq(outcome)].set_index("trait").loc[trait_order]
+        values = frame["pearson_r"].to_numpy()
+        colors = [positive if pd.notna(value) and value >= 0 else negative for value in values]
+        axis.barh(range(len(trait_order)), values, color=colors)
+        axis.axvline(0, color="black", linewidth=0.8)
+        for index, value in enumerate(values):
+            if pd.isna(value):
+                continue
+            ha = "left" if value >= 0 else "right"
+            axis.text(
+                value + (0.018 if value >= 0 else -0.018),
+                index,
+                f"{value:.2f}",
+                va="center",
+                ha=ha,
+                fontsize=8,
+            )
+        axis.set_yticks(range(len(trait_order)), labels)
+        axis.set_xlabel("Pearson correlation")
+        axis.set_xlim(-1.05, 1.05)
+        axis.set_title(f"vs {OUTCOME_LABELS.get(outcome, outcome)}")
+    figure.suptitle("Swing and stance traits vs offensive production", fontsize=13)
+    figure.tight_layout()
     return figure
 
 
